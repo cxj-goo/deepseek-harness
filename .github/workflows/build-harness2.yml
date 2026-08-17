@@ -22,10 +22,6 @@ env:
   IMAGE_TAG: ci  
   CONTAINER_NAME: dsh-web-check  
   PROXY_PORT: '8080'  
-  # The authority remote clients will present as Host when reaching this  
-  # deployment (domain name or bare IP, no port — a port-less trustedHosts  
-  # entry matches the hostname on any port). Override at `docker run` time  
-  # with -e TRUSTED_HOST=<your-domain-or-ip> for your real deployment.  
   VERIFY_TRUSTED_HOST: 'dsh.example.test'  
   
 jobs:  
@@ -48,15 +44,33 @@ jobs:
           } > .dockerignore  
           cat .dockerignore  
   
+      - name: Write nginx site config  
+        run: |  
+          {  
+            echo 'server {'  
+            echo '    listen 0.0.0.0:8080;'  
+            echo ''  
+            echo '    location / {'  
+            echo '        proxy_pass http://127.0.0.1:3080;'  
+            echo '        proxy_set_header Host $http_host;'  
+            echo '        proxy_set_header X-Real-IP $remote_addr;'  
+            echo '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;'  
+            echo '        proxy_set_header X-Forwarded-Proto $scheme;'  
+            echo '        proxy_http_version 1.1;'  
+            echo '        proxy_set_header Upgrade $http_upgrade;'  
+            echo '        proxy_set_header Connection "upgrade";'  
+            echo '    }'  
+            echo '}'  
+          } > dsh-nginx.conf  
+          ls -la dsh-nginx.conf  
+          cat dsh-nginx.conf  
+  
       - name: Write entrypoint script  
         run: |  
           {  
             echo '#!/bin/bash'  
             echo 'set -e'  
             echo ''  
-            echo '# dsh web keeps its default 127.0.0.1 bind (0.0.0.0 is intentionally'  
-            echo '# unsupported by the CLI); --trusted-host lets nginx-forwarded requests'  
-            echo '# with a non-loopback Host pass the /api browser-trust fence.'  
             echo 'if [ -n "${TRUSTED_HOST:-}" ]; then'  
             echo '  node apps/cli/lib/bin.js web --trusted-host "$TRUSTED_HOST" &'  
             echo 'else'  
@@ -67,41 +81,12 @@ jobs:
             echo 'nginx -g "daemon off;" &'  
             echo 'NGINX_PID=$!'  
             echo ''  
-            echo '# Exit (and let the container restart policy handle it) if either'  
-            echo '# process dies, instead of silently running half a stack.'  
             echo 'trap "kill $DSH_PID $NGINX_PID 2>/dev/null || true" TERM INT'  
             echo 'wait -n "$DSH_PID" "$NGINX_PID"'  
             echo 'exit $?'  
           } > entrypoint.sh  
           chmod +x entrypoint.sh  
-          cat entrypoint.sh
-  
-      - name: Write entrypoint script  
-        run: |  
-          {  
-            echo '#!/bin/sh'  
-            echo 'set -e'  
-            echo ''  
-            echo '# dsh web keeps its default 127.0.0.1 bind (0.0.0.0 is intentionally'  
-            echo '# unsupported by the CLI); --trusted-host lets nginx-forwarded requests'  
-            echo '# with a non-loopback Host pass the /api browser-trust fence.'  
-            echo 'if [ -n "${TRUSTED_HOST:-}" ]; then'  
-            echo '  node apps/cli/lib/bin.js web --trusted-host "$TRUSTED_HOST" &'  
-            echo 'else'  
-            echo '  node apps/cli/lib/bin.js web &'  
-            echo 'fi'  
-            echo 'DSH_PID=$!'  
-            echo ''  
-            echo 'nginx -g "daemon off;" &'  
-            echo 'NGINX_PID=$!'  
-            echo ''  
-            echo '# Exit (and let the container restart policy handle it) if either'  
-            echo '# process dies, instead of silently running half a stack.'  
-            echo 'trap "kill $DSH_PID $NGINX_PID 2>/dev/null || true" TERM INT'  
-            echo 'wait -n "$DSH_PID" "$NGINX_PID"'  
-            echo 'exit $?'  
-          } > entrypoint.sh  
-          chmod +x entrypoint.sh  
+          ls -la entrypoint.sh  
           cat entrypoint.sh  
   
       - name: Write Dockerfile  
@@ -111,40 +96,31 @@ jobs:
             echo ''  
             echo 'WORKDIR /app'  
             echo ''  
-            echo '# Bypass the worktree-hooks postinstall guard and disable telemetry'  
-            echo '# for automated/offline image builds.'  
             echo 'ENV CI=true'  
             echo 'ENV DSH_TELEMETRY_DISABLED=1'  
             echo ''  
-            echo '# packageManager declares pnpm@11.7.0; activate the exact version.'  
             echo 'RUN corepack enable && corepack prepare pnpm@11.7.0 --activate'  
             echo ''  
-            echo '# nginx fronts the app: it binds 0.0.0.0, the app keeps 127.0.0.1.'  
-            echo 'RUN apt-get update \'  
-            echo '    && apt-get install -y --no-install-recommends nginx \'  
-            echo '    && rm -rf /var/lib/apt/lists/* /etc/nginx/sites-enabled/default'  
+            echo 'RUN apt-get update && apt-get install -y --no-install-recommends nginx && rm -rf /var/lib/apt/lists/* /etc/nginx/sites-enabled/default'  
             echo ''  
-            echo '# Copy the full monorepo source (pnpm workspace: vendor/*,'  
-            echo '# packages/*/*, native/landlock-run(+packages/*), apps/*, website).'  
             echo 'COPY . .'  
             echo ''  
-            echo '# Install dependencies once, while the build has network access.'  
             echo 'RUN pnpm install --frozen-lockfile'  
             echo ''  
-            echo '# Build host/client libraries and the Web frontend.'  
             echo 'RUN pnpm run build'  
             echo ''  
             echo 'COPY dsh-nginx.conf /etc/nginx/conf.d/dsh.conf'  
             echo 'COPY entrypoint.sh /entrypoint.sh'  
             echo ''  
-            echo '# 3080: dsh web'"'"'s own loopback bind (only reachable inside the'  
-            echo '# container). 8080: nginx'"'"'s all-interfaces listener — this is the'  
-            echo '# port you actually publish with `docker run -p`.'  
             echo 'EXPOSE 3080 8080'  
             echo ''  
             echo 'CMD ["/entrypoint.sh"]'  
           } > Dockerfile  
           cat Dockerfile  
+  
+      - name: Sanity-check build context  
+        run: |  
+          ls -la dsh-nginx.conf entrypoint.sh Dockerfile .dockerignore  
   
       - name: Build image  
         run: docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .  
@@ -153,6 +129,9 @@ jobs:
         run: |  
           set -euo pipefail  
           docker run -d -p "${PROXY_PORT}:${PROXY_PORT}" -e TRUSTED_HOST="${VERIFY_TRUSTED_HOST}" --name "${CONTAINER_NAME}" "${IMAGE_NAME}:${IMAGE_TAG}"  
+  
+          sleep 3  
+          docker logs "${CONTAINER_NAME}" || true  
   
           success=false  
           for i in $(seq 1 30); do  
@@ -188,7 +167,7 @@ jobs:
             exit 1  
           fi  
   
-          docker logs "${CONTAINER_NAME}"
+          docker logs "${CONTAINER_NAME}"  
   
       - name: Stop container  
         if: always()  
