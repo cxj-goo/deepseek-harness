@@ -149,13 +149,7 @@ jobs:
       - name: Start container with published port and verify Web UI + trust fence  
         run: |  
           set -euo pipefail  
-          # Ordinary bridge network + port mapping now works because nginx (not  
-          # dsh web) is what's actually bound to 0.0.0.0 inside the container.  
-          docker run -d \  
-            -p "${PROXY_PORT}:${PROXY_PORT}" \  
-            -e TRUSTED_HOST="${VERIFY_TRUSTED_HOST}" \  
-            --name "${CONTAINER_NAME}" \  
-            "${IMAGE_NAME}:${IMAGE_TAG}"  
+          docker run -d -p "${PROXY_PORT}:${PROXY_PORT}" -e TRUSTED_HOST="${VERIFY_TRUSTED_HOST}" --name "${CONTAINER_NAME}" "${IMAGE_NAME}:${IMAGE_TAG}"  
   
           success=false  
           for i in $(seq 1 30); do  
@@ -175,13 +169,7 @@ jobs:
   
           echo "dsh web (behind nginx) responded successfully on http://127.0.0.1:${PROXY_PORT}"  
   
-          # Prove the trust fence actually evaluates the forwarded, non-loopback  
-          # Host: hitting an /api path with the declared trusted authority must  
-          # not be rejected by the fence (404 == "fence passed, no such route" —  
-          # not 403 == "fence rejected the Host").  
-          trusted_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \  
-            -H "Host: ${VERIFY_TRUSTED_HOST}:${PROXY_PORT}" \  
-            "http://127.0.0.1:${PROXY_PORT}/api/session.list")"  
+          trusted_status="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Host: ${VERIFY_TRUSTED_HOST}:${PROXY_PORT}" "http://127.0.0.1:${PROXY_PORT}/api/session.list")"  
           echo "Declared trusted Host -> /api/session.list status: ${trusted_status}"  
           if [ "${trusted_status}" = "403" ]; then  
             echo "::error::declared trusted Host was rejected by the /api fence (got 403)"  
@@ -189,11 +177,7 @@ jobs:
             exit 1  
           fi  
   
-          # And an undeclared Host must still be refused by the fence (proves  
-          # this is a real authority check, not a proxy that disabled it).  
-          untrusted_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \  
-            -H "Host: not-declared.example:${PROXY_PORT}" \  
-            "http://127.0.0.1:${PROXY_PORT}/api/session.list")"  
+          untrusted_status="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Host: not-declared.example:${PROXY_PORT}" "http://127.0.0.1:${PROXY_PORT}/api/session.list")"  
           echo "Undeclared Host -> /api/session.list status: ${untrusted_status}"  
           if [ "${untrusted_status}" != "403" ]; then  
             echo "::error::an undeclared Host was NOT rejected by the /api fence (expected 403, got ${untrusted_status})"  
@@ -201,7 +185,7 @@ jobs:
             exit 1  
           fi  
   
-          docker logs "${CONTAINER_NAME}"  
+          docker logs "${CONTAINER_NAME}"
   
       - name: Stop container  
         if: always()  
