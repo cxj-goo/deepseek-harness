@@ -122,16 +122,13 @@ jobs:
           fi  
   
           echo "dsh web started successfully and is listening on 0.0.0.0:${LISTEN_PORT}"  
-  
       - name: Simulate external request (non-loopback Host, previously-privileged methods included)  
         run: |  
           set -euo pipefail  
   
           # Basic UI reachability with a non-loopback declared Host header,  
           # simulating a client hitting the published port from off-box.  
-          ui_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \  
-            -H "Host: ${VERIFY_TRUSTED_HOST}:${LISTEN_PORT}" \  
-            "http://127.0.0.1:${LISTEN_PORT}/")"  
+          ui_status="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Host: ${VERIFY_TRUSTED_HOST}:${LISTEN_PORT}" "http://127.0.0.1:${LISTEN_PORT}/")"  
           echo "External-looking request to / -> status: ${ui_status}"  
           if [ "${ui_status}" != "200" ]; then  
             echo "::error::simulated external request to / failed (got ${ui_status})"  
@@ -140,11 +137,7 @@ jobs:
           fi  
   
           # session.list (ordinary /api method) must be reachable with the declared Host.  
-          session_list_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \  
-            -H "Host: ${VERIFY_TRUSTED_HOST}:${LISTEN_PORT}" \  
-            -H "Content-Type: application/json" \  
-            -X POST --data '{}' \  
-            "http://127.0.0.1:${LISTEN_PORT}/api/session.list")"  
+          session_list_status="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Host: ${VERIFY_TRUSTED_HOST}:${LISTEN_PORT}" -H "Content-Type: application/json" -X POST --data '{}' "http://127.0.0.1:${LISTEN_PORT}/api/session.list")"  
           echo "External-looking request to /api/session.list -> status: ${session_list_status}"  
           if [ "${session_list_status}" = "403" ]; then  
             echo "::error::/api/session.list was rejected (got 403) for the declared trusted Host"  
@@ -154,11 +147,7 @@ jobs:
   
           # credentials.describe was previously loopback-only (PRIVILEGED_METHODS);  
           # after the patch it must also be reachable with the declared Host.  
-          credentials_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \  
-            -H "Host: ${VERIFY_TRUSTED_HOST}:${LISTEN_PORT}" \  
-            -H "Content-Type: application/json" \  
-            -X POST --data '{"refs":["DEEPSEEK_API_KEY"]}' \  
-            "http://127.0.0.1:${LISTEN_PORT}/api/credentials.describe")"  
+          credentials_status="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Host: ${VERIFY_TRUSTED_HOST}:${LISTEN_PORT}" -H "Content-Type: application/json" -X POST --data '{"refs":["DEEPSEEK_API_KEY"]}' "http://127.0.0.1:${LISTEN_PORT}/api/credentials.describe")"  
           echo "External-looking request to /api/credentials.describe -> status: ${credentials_status}"  
           if [ "${credentials_status}" = "403" ]; then  
             echo "::error::/api/credentials.describe was rejected (got 403) — privileged-method patch did not take effect"  
@@ -168,7 +157,7 @@ jobs:
   
           echo "All simulated external requests succeeded (200/expected, no 403 from either ordinary or previously-privileged methods)"  
           docker logs "${CONTAINER_NAME}"  
-  
+
       - name: Stop container  
         if: always()  
         run: |  
