@@ -1,0 +1,131 @@
+name: Docker Image Build and Verify (offline)  
+  
+# Manually triggered: builds a node:24-based image with the project installed  
+# and built from source, so the container runs fully offline at `docker run`  
+# time (no npx/registry access needed). Verifies the Web UI comes up, then  
+# exports the image as a 7-day artifact.  
+on:  
+  workflow_dispatch: {}  
+  
+concurrency:  
+  group: docker-image-build-and-verify-offline-${{ github.ref }}  
+  cancel-in-progress: true  
+  
+permissions:  
+  contents: read  
+  
+env:  
+  IMAGE_NAME: dsh-web  
+  IMAGE_TAG: ci  
+  CONTAINER_NAME: dsh-web-check  
+  
+jobs:  
+  build-and-verify:  
+    name: Build image from source, start dsh web offline, verify, and package  
+    runs-on: ubuntu-latest  
+    timeout-minutes: 60  
+    steps:  
+      - name: Checkout  
+        uses: actions/checkout@v6  
+  
+      - name: Write .dockerignore  
+        run: |  
+          {  
+            echo '.git'  
+            echo 'node_modules'  
+            echo '**/node_modules'  
+            echo '**/dist'  
+            echo '**/lib'  
+          } > .dockerignore  
+          cat .dockerignore  
+  
+      - name: Write Dockerfile  
+        run: |  
+          {  
+            echo 'FROM node:24'  
+            echo ''  
+            echo 'WORKDIR /app'  
+            echo ''  
+            echo '# Bypass the worktree-hooks postinstall guard and disable telemetry'  
+            echo '# for automated/offline image builds.'  
+            echo 'ENV CI=true'  
+            echo 'ENV DSH_TELEMETRY_DISABLED=1'  
+            echo ''  
+            echo '# packageManager declares pnpm@11.7.0; activate the exact version.'  
+            echo 'RUN corepack enable && corepack prepare pnpm@11.7.0 --activate'  
+            echo ''  
+            echo '# Copy the full monorepo source (pnpm workspace: vendor/*,'  
+            echo '# packages/*/*, native/landlock-run(+packages/*), apps/*, website).'  
+            echo 'COPY . .'  
+            echo ''  
+            echo '# Install dependencies once, while the build has network access.'  
+            echo 'RUN pnpm install --frozen-lockfile'  
+            echo ''  
+            echo '# Build host/client libraries and the Web frontend.'  
+            echo 'RUN pnpm run build'  
+            echo ''  
+            echo 'EXPOSE 3080'  
+            echo ''  
+            echo '# Run the built CLI directly with node — no npx/pnpm/network'  
+            echo '# access required at container start. Equivalent to `dsh web`.'  
+            echo 'CMD ["node", "apps/cli/lib/bin.js", "web"]'  
+          } > Dockerfile  
+          cat Dockerfile  
+  
+      - name: Build image  
+        run: docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .  
+  
+      - name: Start container fully offline and verify Web UI is up  
+        run: |  
+          set -euo pipefail  
+          # dsh web only binds 127.0.0.1, so host networking is required for  
+          # the runner to reach it directly. --network=none would also prove  
+          # offline startup, but host networking is needed to actually curl it,  
+          # so we additionally disable DNS/egress at the container level below.  
+          docker run -d --network host --name "${CONTAINER_NAME}" "${IMAGE_NAME}:${IMAGE_TAG}"  
+  
+          success=false  
+          for i in $(seq 1 30); do  
+            if curl --fail --silent --show-error http://127.0.0.1:3080/ -o /dev/null; then  
+              success=true  
+              break  
+            fi  
+            echo "Waiting for dsh web to become available... (${i}/30)"  
+            sleep 2  
+          done  
+  
+          if [ "${success}" != true ]; then  
+            echo "::error::dsh web did not respond on http://127.0.0.1:3080 within the timeout"  
+            docker logs "${CONTAINER_NAME}" || true  
+            exit 1  
+          fi  
+  
+          echo "dsh web responded successfully on http://127.0.0.1:3080"  
+          docker logs "${CONTAINER_NAME}"  
+  
+      - name: Prove the image needs no network at runtime  
+        run: |  
+          set -euo pipefail  
+          docker stop "${CONTAINER_NAME}" || true  
+          docker rm "${CONTAINER_NAME}" || true  
+          # --network none: no network interface at all except loopback inside  
+          # the container's own namespace. If the app still boots and prints  
+          # its ready line, startup genuinely required no network access.  
+          docker run -d --network none --name "${CONTAINER_NAME}-offline" "${IMAGE_NAME}:${IMAGE_TAG}"  
+          sleep 5  
+          docker logs "${CONTAINER_NAME}-offline"  
+          docker logs "${CONTAINER_NAME}-offline" | grep -q 'dsh web:' \  
+            && echo "Confirmed: container started and printed its ready line with --network none." \  
+            || { echo "::error::dsh web did not print its ready line under --network none"; exit 1; }  
+          docker stop "${CONTAINER_NAME}-offline" || true  
+  
+      - name: Save image as tarball  
+        run: docker save "${IMAGE_NAME}:${IMAGE_TAG}" -o dsh-web-image.tar  
+  
+      - name: Upload image artifact  
+        uses: actions/upload-artifact@v7  
+        with:  
+          name: dsh-web-image  
+          path: dsh-web-image.tar  
+          if-no-files-found: error  
+          retention-days: 7
