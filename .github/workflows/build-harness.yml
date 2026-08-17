@@ -108,16 +108,16 @@ jobs:
           set -euo pipefail  
           docker stop "${CONTAINER_NAME}" || true  
           docker rm "${CONTAINER_NAME}" || true  
-          # --network none: no network interface at all except loopback inside  
-          # the container's own namespace. If the app still boots and prints  
-          # its ready line, startup genuinely required no network access.  
           docker run -d --network none --name "${CONTAINER_NAME}-offline" "${IMAGE_NAME}:${IMAGE_TAG}"  
           sleep 5  
           docker logs "${CONTAINER_NAME}-offline"  
-          docker logs "${CONTAINER_NAME}-offline" | grep -q 'dsh web:' \  
-            && echo "Confirmed: container started and printed its ready line with --network none." \  
-            || { echo "::error::dsh web did not print its ready line under --network none"; exit 1; }  
-          docker stop "${CONTAINER_NAME}-offline" || true  
+          if docker logs "${CONTAINER_NAME}-offline" | grep -q 'dsh web:'; then  
+            echo "Confirmed: container started and printed its ready line with --network none."  
+          else  
+            echo "::error::dsh web did not print its ready line under --network none"  
+            exit 1  
+          fi  
+          docker stop "${CONTAINER_NAME}-offline" || true
   
       - name: Save image as tarball  
         run: docker save "${IMAGE_NAME}:${IMAGE_TAG}" -o dsh-web-image.tar  
