@@ -1,0 +1,100 @@
+name: Docker Image Build and Verify  
+  
+# 手动触发:构建基于 node:24 的镜像,源码安装依赖并构建,  
+# 启动 dsh web 服务并验证监听是否成功,最后导出镜像 tar 包作为 Artifact。  
+on:  
+  workflow_dispatch: {}  
+  
+concurrency:  
+  group: docker-image-build-and-verify-${{ github.ref }}  
+  cancel-in-progress: true  
+  
+permissions:  
+  contents: read  
+  
+env:  
+  # 避免 CI 运行上报到生产遥测端点。  
+  DSH_TELEMETRY_DISABLED: '1'  
+  IMAGE_NAME: dsh-web  
+  IMAGE_TAG: ci  
+  CONTAINER_NAME: dsh-web-check  
+  
+jobs:  
+  build-and-verify:  
+    name: Build image, start dsh web, verify, and package  
+    runs-on: ubuntu-latest  
+    timeout-minutes: 60  
+    steps:  
+      - name: Checkout  
+        uses: actions/checkout@v6  
+  
+      - name: Write Dockerfile  
+        run: |  
+          cat > Dockerfile <<'EOF'  
+          FROM node:24  
+  
+          WORKDIR /app  
+  
+          # packageManager 字段声明的是 pnpm@11.7.0,corepack 直接激活对应版本。  
+          RUN corepack enable && corepack prepare pnpm@11.7.0 --activate  
+  
+          # 复制全部源码(pnpm workspace monorepo,workspaces 涉及  
+          # vendor/*、packages/*/*、native/landlock-run(及其 packages/*)、  
+          # apps/*、website,一次性复制避免遗漏)。  
+          COPY . .  
+  
+          RUN pnpm install --frozen-lockfile  
+  
+          # 构建 host/client 库以及 Web 前端产物。  
+          RUN pnpm run build  
+  
+          ENV DSH_TELEMETRY_DISABLED=1  
+          EXPOSE 3080  
+  
+          # 默认启动命令:等价于 `dsh web`(--profile web 的硬编码别名),  
+          # 默认监听 127.0.0.1:3080,目前不支持 --host 0.0.0.0。  
+          CMD ["node", "apps/cli/lib/bin.js", "web"]  
+          EOF  
+  
+      - name: Build image  
+        run: docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .  
+  
+      - name: Start container and verify Web UI is up  
+        run: |  
+          set -euo pipefail  
+          # 服务只监听 127.0.0.1,必须用 host 网络才能从 runner 上直接探测端口。  
+          docker run -d --network host --name "${CONTAINER_NAME}" "${IMAGE_NAME}:${IMAGE_TAG}"  
+  
+          success=false  
+          for i in $(seq 1 30); do  
+            if curl --fail --silent --show-error http://127.0.0.1:3080/ -o /dev/null; then  
+              success=true  
+              break  
+            fi  
+            echo "Waiting for dsh web to become available... (${i}/30)"  
+            sleep 2  
+          done  
+  
+          if [ "${success}" != true ]; then  
+            echo "::error::dsh web did not respond on http://127.0.0.1:3080 within the timeout"  
+            docker logs "${CONTAINER_NAME}" || true  
+            exit 1  
+          fi  
+  
+          echo "dsh web responded successfully on http://127.0.0.1:3080"  
+          docker logs "${CONTAINER_NAME}"  
+  
+      - name: Stop container  
+        if: always()  
+        run: docker stop "${CONTAINER_NAME}" || true  
+  
+      - name: Save image as tarball  
+        run: docker save "${IMAGE_NAME}:${IMAGE_TAG}" -o dsh-web-image.tar  
+  
+      - name: Upload image artifact  
+        uses: actions/upload-artifact@v7  
+        with:  
+          name: dsh-web-image  
+          path: dsh-web-image.tar  
+          if-no-files-found: error  
+          retention-days: 7
