@@ -36,28 +36,23 @@ jobs:
           set -euo pipefail  
   
           # 1) allow --host 0.0.0.0 (remove the CLI guard that rejects it)  
-          python3 - <<'PY'  
-          import re, pathlib  
-          p = pathlib.Path("packages/bundle/web-app/src/startup.ts")  
-          s = p.read_text()  
-          pattern = re.compile(  
-              r"\s*if \(options\.host === '0\.0\.0\.0'\) \{\n"  
-              r"\s*program\.error\('error: --host 0\.0\.0\.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127\.0\.0\.1 instead'\)\n"  
-              r"\s*\}\n"  
-          )  
-          new_s, n = pattern.subn("\n", s, count=1)  
-          assert n == 1, "startup.ts patch target not found"  
-          p.write_text(new_s)  
-          PY  
+          perl -0777 -pi -e "s/\n\s*if \(options\.host === '0\.0\.0\.0'\) \{\n\s*program\.error\('error: --host 0\.0\.0\.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127\.0\.0\.1 instead'\)\n\s*\}\n/\n/" \  
+            packages/bundle/web-app/src/startup.ts  
   
           # 2) let privileged methods (credentials.*, settings.*, agentPreset.*, host.*)  
           #    honor --trusted-host instead of being hard-pinned to loopback  
-          sed -i "s/&& !isTrustedApiRequest(request, \[\])) {/\&\& !isTrustedApiRequest(request, trustedHosts)) {/" \  
+          sed -i 's/&& !isTrustedApiRequest(request, \[\])) {/\&\& !isTrustedApiRequest(request, trustedHosts)) {/' \  
             packages/client/connection/src/index.ts  
   
           # sanity checks: fail fast if either patch silently no-op'd  
-          ! grep -q "0.0.0.0' is intentionally not supported" packages/bundle/web-app/src/startup.ts  
-          grep -q "isTrustedApiRequest(request, trustedHosts)" packages/client/connection/src/index.ts  
+          if grep -q "0.0.0.0' is intentionally not supported" packages/bundle/web-app/src/startup.ts; then  
+            echo "::error::startup.ts patch did not apply"  
+            exit 1  
+          fi  
+          if ! grep -q "isTrustedApiRequest(request, trustedHosts)" packages/client/connection/src/index.ts; then  
+            echo "::error::index.ts patch did not apply"  
+            exit 1  
+          fi  
   
           echo '--- diff ---'  
           git diff  
