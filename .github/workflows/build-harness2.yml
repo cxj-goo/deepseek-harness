@@ -48,30 +48,33 @@ jobs:
           } > .dockerignore  
           cat .dockerignore  
   
-      - name: Write nginx site config  
+      - name: Write entrypoint script  
         run: |  
           {  
-            echo 'server {'  
-            echo '    listen 0.0.0.0:8080;'  
+            echo '#!/bin/bash'  
+            echo 'set -e'  
             echo ''  
-            echo '    location / {'  
-            echo '        proxy_pass http://127.0.0.1:3080;'  
-            echo '        # Forward the authority exactly as the client sent it, so the'  
-            echo '        # app'"'"'s /api Host-based trust fence sees the real remote'  
-            echo '        # authority instead of nginx'"'"'s own loopback hop.'  
-            echo '        proxy_set_header Host $http_host;'  
-            echo '        proxy_set_header X-Real-IP $remote_addr;'  
-            echo '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;'  
-            echo '        proxy_set_header X-Forwarded-Proto $scheme;'  
-            echo '        proxy_http_version 1.1;'  
-            echo '        # Needed for the /api/events.mux and /api/events.host WebSocket'  
-            echo '        # downlinks.'  
-            echo '        proxy_set_header Upgrade $http_upgrade;'  
-            echo '        proxy_set_header Connection "upgrade";'  
-            echo '    }'  
-            echo '}'  
-          } > dsh-nginx.conf  
-          cat dsh-nginx.conf  
+            echo '# dsh web keeps its default 127.0.0.1 bind (0.0.0.0 is intentionally'  
+            echo '# unsupported by the CLI); --trusted-host lets nginx-forwarded requests'  
+            echo '# with a non-loopback Host pass the /api browser-trust fence.'  
+            echo 'if [ -n "${TRUSTED_HOST:-}" ]; then'  
+            echo '  node apps/cli/lib/bin.js web --trusted-host "$TRUSTED_HOST" &'  
+            echo 'else'  
+            echo '  node apps/cli/lib/bin.js web &'  
+            echo 'fi'  
+            echo 'DSH_PID=$!'  
+            echo ''  
+            echo 'nginx -g "daemon off;" &'  
+            echo 'NGINX_PID=$!'  
+            echo ''  
+            echo '# Exit (and let the container restart policy handle it) if either'  
+            echo '# process dies, instead of silently running half a stack.'  
+            echo 'trap "kill $DSH_PID $NGINX_PID 2>/dev/null || true" TERM INT'  
+            echo 'wait -n "$DSH_PID" "$NGINX_PID"'  
+            echo 'exit $?'  
+          } > entrypoint.sh  
+          chmod +x entrypoint.sh  
+          cat entrypoint.sh
   
       - name: Write entrypoint script  
         run: |  
