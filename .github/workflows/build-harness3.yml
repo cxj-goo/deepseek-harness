@@ -36,13 +36,10 @@ jobs:
           set -euo pipefail  
   
           # 1) allow --host 0.0.0.0 (remove the CLI guard that rejects it)  
-          perl -0777 -pi -e "s/\n\s*if \(options\.host === '0\.0\.0\.0'\) \{\n\s*program\.error\('error: --host 0\.0\.0\.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127\.0\.0\.1 instead'\)\n\s*\}\n/\n/" \  
-            packages/bundle/web-app/src/startup.ts  
+          perl -0777 -pi -e "s/\n\s*if \(options\.host === '0\.0\.0\.0'\) \{\n\s*program\.error\('error: --host 0\.0\.0\.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127\.0\.0\.1 instead'\)\n\s*\}\n/\n/" packages/bundle/web-app/src/startup.ts  
   
-          # 2) let privileged methods (credentials.*, settings.*, agentPreset.*, host.*)  
-          #    honor --trusted-host instead of being hard-pinned to loopback  
-          sed -i 's/&& !isTrustedApiRequest(request, \[\])) {/\&\& !isTrustedApiRequest(request, trustedHosts)) {/' \  
-            packages/client/connection/src/index.ts  
+          # 2) let privileged methods (credentials.*, settings.*, agentPreset.*, host.*) honor --trusted-host instead of being hard-pinned to loopback  
+          sed -i 's/&& !isTrustedApiRequest(request, \[\])) {/\&\& !isTrustedApiRequest(request, trustedHosts)) {/' packages/client/connection/src/index.ts  
   
           # sanity checks: fail fast if either patch silently no-op'd  
           if grep -q "0.0.0.0' is intentionally not supported" packages/bundle/web-app/src/startup.ts; then  
@@ -56,6 +53,7 @@ jobs:
   
           echo '--- diff ---'  
           git diff  
+  
   
       - name: Write .dockerignore  
         run: |  
