@@ -30,31 +30,24 @@ jobs:
   
       - name: Write Dockerfile  
         run: |  
-          cat > Dockerfile <<'EOF'  
+          cat > Dockerfile <<'DOCKERFILE_EOF'  
           FROM node:24  
   
           WORKDIR /app  
   
-          # packageManager 字段声明的是 pnpm@11.7.0,corepack 直接激活对应版本。  
           RUN corepack enable && corepack prepare pnpm@11.7.0 --activate  
   
-          # 复制全部源码(pnpm workspace monorepo,workspaces 涉及  
-          # vendor/*、packages/*/*、native/landlock-run(及其 packages/*)、  
-          # apps/*、website,一次性复制避免遗漏)。  
           COPY . .  
   
           RUN pnpm install --frozen-lockfile  
   
-          # 构建 host/client 库以及 Web 前端产物。  
           RUN pnpm run build  
   
           ENV DSH_TELEMETRY_DISABLED=1  
           EXPOSE 3080  
   
-          # 默认启动命令:等价于 `dsh web`(--profile web 的硬编码别名),  
-          # 默认监听 127.0.0.1:3080,目前不支持 --host 0.0.0.0。  
           CMD ["node", "apps/cli/lib/bin.js", "web"]  
-          EOF  
+          DOCKERFILE_EOF
   
       - name: Build image  
         run: docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .  
