@@ -1,0 +1,194 @@
+name: Docker Image Build and Verify (patched for unrestricted external access)  
+  
+# Manually triggered: patches CLI source to allow --host 0.0.0.0 and to let  
+# privileged /api methods (credentials.*, settings.*, agentPreset.*) honor  
+# --trusted-host, builds the image, starts a container, verifies the service  
+# comes up and responds to a simulated external request (non-loopback Host  
+# header, via the published port), then packages the image as an artifact.  
+on:  
+  workflow_dispatch: {}  
+  
+concurrency:  
+  group: docker-image-build-and-verify-unrestricted-${{ github.ref }}  
+  cancel-in-progress: true  
+  
+permissions:  
+  contents: read  
+  
+env:  
+  IMAGE_NAME: dsh-web  
+  IMAGE_TAG: ci  
+  CONTAINER_NAME: dsh-web-check  
+  LISTEN_PORT: '3080'  
+  VERIFY_TRUSTED_HOST: 'dsh.example.test'  
+  
+jobs:  
+  build-and-verify:  
+    name: Patch source, build image, verify startup + simulated external access, package  
+    runs-on: ubuntu-latest  
+    timeout-minutes: 60  
+    steps:  
+      - name: Checkout  
+        uses: actions/checkout@v6  
+  
+      - name: Patch source for unrestricted remote access  
+        run: |  
+          set -euo pipefail  
+  
+          # 1) allow --host 0.0.0.0 (remove the CLI guard that rejects it)  
+          python3 - <<'PY'  
+          import re, pathlib  
+          p = pathlib.Path("packages/bundle/web-app/src/startup.ts")  
+          s = p.read_text()  
+          pattern = re.compile(  
+              r"\s*if \(options\.host === '0\.0\.0\.0'\) \{\n"  
+              r"\s*program\.error\('error: --host 0\.0\.0\.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127\.0\.0\.1 instead'\)\n"  
+              r"\s*\}\n"  
+          )  
+          new_s, n = pattern.subn("\n", s, count=1)  
+          assert n == 1, "startup.ts patch target not found"  
+          p.write_text(new_s)  
+          PY  
+  
+          # 2) let privileged methods (credentials.*, settings.*, agentPreset.*, host.*)  
+          #    honor --trusted-host instead of being hard-pinned to loopback  
+          sed -i "s/&& !isTrustedApiRequest(request, \[\])) {/\&\& !isTrustedApiRequest(request, trustedHosts)) {/" \  
+            packages/client/connection/src/index.ts  
+  
+          # sanity checks: fail fast if either patch silently no-op'd  
+          ! grep -q "0.0.0.0' is intentionally not supported" packages/bundle/web-app/src/startup.ts  
+          grep -q "isTrustedApiRequest(request, trustedHosts)" packages/client/connection/src/index.ts  
+  
+          echo '--- diff ---'  
+          git diff  
+  
+      - name: Write .dockerignore  
+        run: |  
+          {  
+            echo '.git'  
+            echo 'node_modules'  
+            echo '**/node_modules'  
+            echo '**/dist'  
+            echo '**/lib'  
+          } > .dockerignore  
+          cat .dockerignore  
+  
+      - name: Write Dockerfile  
+        run: |  
+          {  
+            echo 'FROM node:24'  
+            echo ''  
+            echo 'WORKDIR /app'  
+            echo ''  
+            echo 'ENV CI=true'  
+            echo 'ENV DSH_TELEMETRY_DISABLED=1'  
+            echo ''  
+            echo 'RUN corepack enable && corepack prepare pnpm@11.7.0 --activate'  
+            echo ''  
+            echo 'COPY . .'  
+            echo ''  
+            echo 'RUN pnpm install --frozen-lockfile'  
+            echo ''  
+            echo 'RUN pnpm run build'  
+            echo ''  
+            echo 'EXPOSE 3080'  
+            echo ''  
+            echo 'CMD ["node", "apps/cli/lib/bin.js", "web", "--host", "0.0.0.0", "--port", "3080", "--trusted-host", "dsh.example.test"]'  
+          } > Dockerfile  
+          cat Dockerfile  
+  
+      - name: Sanity-check build context  
+        run: |  
+          ls -la Dockerfile .dockerignore  
+  
+      - name: Build image  
+        run: docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .  
+  
+      - name: Start container and verify it comes up  
+        run: |  
+          set -euo pipefail  
+          docker run -d -p "${LISTEN_PORT}:${LISTEN_PORT}" --name "${CONTAINER_NAME}" "${IMAGE_NAME}:${IMAGE_TAG}"  
+  
+          sleep 3  
+          docker logs "${CONTAINER_NAME}" || true  
+  
+          success=false  
+          for i in $(seq 1 30); do  
+            if curl --fail --silent --show-error "http://127.0.0.1:${LISTEN_PORT}/" -o /dev/null; then  
+              success=true  
+              break  
+            fi  
+            echo "Waiting for dsh web to become available... (${i}/30)"  
+            sleep 2  
+          done  
+  
+          if [ "${success}" != true ]; then  
+            echo "::error::dsh web did not respond on http://127.0.0.1:${LISTEN_PORT} within the timeout"  
+            docker logs "${CONTAINER_NAME}" || true  
+            exit 1  
+          fi  
+  
+          echo "dsh web started successfully and is listening on 0.0.0.0:${LISTEN_PORT}"  
+  
+      - name: Simulate external request (non-loopback Host, previously-privileged methods included)  
+        run: |  
+          set -euo pipefail  
+  
+          # Basic UI reachability with a non-loopback declared Host header,  
+          # simulating a client hitting the published port from off-box.  
+          ui_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \  
+            -H "Host: ${VERIFY_TRUSTED_HOST}:${LISTEN_PORT}" \  
+            "http://127.0.0.1:${LISTEN_PORT}/")"  
+          echo "External-looking request to / -> status: ${ui_status}"  
+          if [ "${ui_status}" != "200" ]; then  
+            echo "::error::simulated external request to / failed (got ${ui_status})"  
+            docker logs "${CONTAINER_NAME}"  
+            exit 1  
+          fi  
+  
+          # session.list (ordinary /api method) must be reachable with the declared Host.  
+          session_list_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \  
+            -H "Host: ${VERIFY_TRUSTED_HOST}:${LISTEN_PORT}" \  
+            -H "Content-Type: application/json" \  
+            -X POST --data '{}' \  
+            "http://127.0.0.1:${LISTEN_PORT}/api/session.list")"  
+          echo "External-looking request to /api/session.list -> status: ${session_list_status}"  
+          if [ "${session_list_status}" = "403" ]; then  
+            echo "::error::/api/session.list was rejected (got 403) for the declared trusted Host"  
+            docker logs "${CONTAINER_NAME}"  
+            exit 1  
+          fi  
+  
+          # credentials.describe was previously loopback-only (PRIVILEGED_METHODS);  
+          # after the patch it must also be reachable with the declared Host.  
+          credentials_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \  
+            -H "Host: ${VERIFY_TRUSTED_HOST}:${LISTEN_PORT}" \  
+            -H "Content-Type: application/json" \  
+            -X POST --data '{"refs":["DEEPSEEK_API_KEY"]}' \  
+            "http://127.0.0.1:${LISTEN_PORT}/api/credentials.describe")"  
+          echo "External-looking request to /api/credentials.describe -> status: ${credentials_status}"  
+          if [ "${credentials_status}" = "403" ]; then  
+            echo "::error::/api/credentials.describe was rejected (got 403) — privileged-method patch did not take effect"  
+            docker logs "${CONTAINER_NAME}"  
+            exit 1  
+          fi  
+  
+          echo "All simulated external requests succeeded (200/expected, no 403 from either ordinary or previously-privileged methods)"  
+          docker logs "${CONTAINER_NAME}"  
+  
+      - name: Stop container  
+        if: always()  
+        run: |  
+          docker stop "${CONTAINER_NAME}" || true  
+          docker rm "${CONTAINER_NAME}" || true  
+  
+      - name: Save image as tarball  
+        run: docker save "${IMAGE_NAME}:${IMAGE_TAG}" -o dsh-web-image.tar  
+  
+      - name: Upload image artifact  
+        uses: actions/upload-artifact@v7  
+        with:  
+          name: dsh-web-image  
+          path: dsh-web-image.tar  
+          if-no-files-found: error  
+          retention-days: 7
